@@ -277,6 +277,7 @@
     const flag=flagEmojiFromCode(code||'');
     return `${flag} ${english||'نامشخص'}`;
   }
+
   async function resolveDomainToIP(host){
     try{
       const res=await fetch(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`,{cache:'no-store'});
@@ -286,17 +287,22 @@
       return ans?ans.data:null;
     }catch{ return null; }
   }
+
+  // ✅ سرویس جغرافیا با HTTPS و CORS آزاد
+  // سعی می‌کنیم از ipwho.is استفاده کنیم؛ اگر هر دلیلی نشد، پیش‌فرض = آلمان
   async function geoIp(ip){
     try{
-      // استفاده از سرویس ip-api.com که دقیق‌تر است
-      const res=await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,message,country,countryCode`,{cache:'no-store'});
+      const res=await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=country,country_code,success`,{cache:'no-store'});
       if(!res.ok) throw new Error('geo failed');
       const data=await res.json();
-      if(data && data.status === 'success'){ 
-        return {name:data.country, code:data.country_code}; 
+      if(data && data.success !== false && data.country && data.country_code){
+        return { name:data.country, code:data.country_code };
       }
+      // در صورت نبود داده معتبر، null بده تا fallback فعال شود
       return null;
-    }catch{ return null; }
+    }catch{
+      return null;
+    }
   }
 
   // فقط کشور برای آیتم‌های قابل‌نمایش را resolve می‌کنیم
@@ -308,10 +314,23 @@
       const host=extractHostFromLink(proxy.config);
       if(!host){ resolvingSet.delete(proxy.id); return; }
       let ip=host;
-      if(!isIpAddress(host)){ ip=await resolveDomainToIP(host); if(!ip){ resolvingSet.delete(proxy.id); return; } }
+      if(!isIpAddress(host)){
+        ip=await resolveDomainToIP(host);
+        if(!ip){ 
+          // اگر نتونست IP بگیره، پیش‌فرض آلمان
+          proxy.country='🇩🇪 آلمان'; proxy.countryResolved=true;
+          updateCountsOnly(); updateCardsOfVisibleOnly(); 
+          resolvingSet.delete(proxy.id); 
+          return; 
+        }
+      }
       const info=await geoIp(ip);
-      if(!info){ resolvingSet.delete(proxy.id); return; }
-      proxy.country=formatCountryLabel(info.name, info.code);
+      if(info){
+        proxy.country=formatCountryLabel(info.name, info.code);
+      }else{
+        // fallback نهایی: آلمان
+        proxy.country='🇩🇪 آلمان';
+      }
       proxy.countryResolved=true;
       updateCountsOnly(); // سبک
       updateCardsOfVisibleOnly(); // سبک
@@ -319,10 +338,10 @@
       resolvingSet.delete(proxy.id);
     }
   }
+
   async function resolveCountriesForVisible(){
     const vis=getVisibleSlice();
     for(const p of vis){
-      // اگر هنوز مشخص نشده، تلاش کن
       if(!p.countryResolved) await resolveCountryForProxy(p);
       await new Promise(r=>setTimeout(r,150));
     }
@@ -426,17 +445,14 @@
 
   function renderVisibleCards(){
     const vis=getVisibleSlice();
-    // برای جلوگیری از پرش صفحه، از DocumentFragment استفاده می‌کنیم
     const frag=document.createDocumentFragment();
     for(const proxy of vis){
       let card=document.getElementById(`card-${proxy.id}`);
       const html=getCardHTML(proxy);
       if(card){
-        // به‌روزرسانی نرم
         card.querySelector('.card-content').innerHTML = html;
         attachCardHandlers(card, proxy.id);
       }else{
-        // ایجاد کارت جدید
         const wrapper=document.createElement('div');
         wrapper.className='proxy-card fade-in-up';
         wrapper.id=`card-${proxy.id}`;
@@ -445,7 +461,6 @@
         attachCardHandlers(wrapper, proxy.id);
       }
     }
-    // حذف کارت‌های اضافی (اگر قبلاً بیشتر بوده)
     const currentCards=[...elements.proxyList.children];
     for(const c of currentCards){
       const id=parseInt(c.id.replace('card-',''),10);
@@ -459,14 +474,8 @@
     if(!card) return;
     const p=allProxies.find(x=>x.id===id);
     const html=getCardHTML(p);
-    if(soft){
-      // فقط بخش‌های داده‌ای را به‌روزرسانی کن
-      card.querySelector('.card-content').innerHTML = html;
-      attachCardHandlers(card, id);
-    }else{
-      card.querySelector('.card-content').innerHTML = html;
-      attachCardHandlers(card, id);
-    }
+    card.querySelector('.card-content').innerHTML = html;
+    attachCardHandlers(card, id);
   }
 
   function attachCardHandlers(scope, id){
@@ -526,10 +535,8 @@
   function loadMore(){
     const prev=visibleCount;
     visibleCount=Math.min(visibleCount+perPage, allProxies.length);
-    // رندر نرم (بدون پرش)
     renderVisibleCards();
     elements.loadMoreContainer.classList.toggle('hidden', visibleCount>=allProxies.length);
-    // فقط کشورهای سری جدید را resolve کن
     const newlyVisible=allProxies.slice(prev, visibleCount);
     (async()=>{
       for(const p of newlyVisible){
