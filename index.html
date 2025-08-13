@@ -235,11 +235,31 @@
   };
 
   // --- Country helpers ---
+  function countryFlag(countryCode){
+    if(!countryCode) return '🌐';
+    try{
+      return countryCode.toUpperCase().replace(/./g, char =>
+        String.fromCodePoint(127397 + char.charCodeAt(0))
+      );
+    }catch{
+      return '🌐';
+    }
+  }
+
+  function flagAndNameFromData(countryCode, countryName){
+    if(countryCode && countryName){
+      const flag = countryFlag(countryCode);
+      return `${flag} ${countryName}`;
+    }
+    return '🌐 نامشخص';
+  }
+
   function flagEmojiFromCode(code){
-    if(!code||code.length!==2) return '🌍';
+    if(!code||code.length!==2) return '🌐';
     const base=127397;
     return String.fromCodePoint(code[0].toUpperCase().charCodeAt(0)+base)+String.fromCodePoint(code[1].toUpperCase().charCodeAt(0)+base);
   }
+
   function isIpAddress(host){ return /^\d{1,3}(\.\d{1,3}){3}$/.test(host); }
   function safeAtob(str){
     try{
@@ -277,6 +297,75 @@
     const flag=flagEmojiFromCode(code||'');
     return `${flag} ${english||'نامشخص'}`;
   }
+
+  // استفاده از ipapi.co برای گرفتن کشور از IP یا دامنه
+  // نمونه: https://ipapi.co/8.8.8.8/json/ یا https://ipapi.co/google.com/json/
+  async function getCountryInfoFromIpapi(hostOrIp){
+    try{
+      // ipapi اجازه استفاده از دامنه یا آی‌پی را می‌دهد؛ در بعضی موارد ممکن است محدودیت داشته باشد.
+      const url = `https://ipapi.co/${encodeURIComponent(hostOrIp)}/json/`;
+      const res = await fetch(url, {cache:'no-store'});
+      if(!res.ok) throw new Error('ipapi response not ok');
+      const data = await res.json();
+      // data.country (ex: "US"), data.country_name (ex: "United States")
+      if(data && data.country && data.country_name){
+        return {code: data.country, name: data.country_name};
+      }
+      return null;
+    }catch(err){
+      // اگر ipapi خطا داد، فقط null برگردان
+      console.warn('ipapi error for', hostOrIp, err);
+      return null;
+    }
+  }
+
+  // فقط کشور برای آیتم‌های قابل‌نمایش را resolve می‌کنیم
+  let resolvingSet=new Set(); // جلوگیری از تکرار
+  async function resolveCountryForProxy(proxy){
+    if(resolvingSet.has(proxy.id) || proxy.countryResolved) return;
+    resolvingSet.add(proxy.id);
+    try{
+      const host=extractHostFromLink(proxy.config);
+      if(!host){ resolvingSet.delete(proxy.id); return; }
+      let ipOrHost = host;
+      // اگر دامین است سعی کن DNS lookup از گوگل بگیری
+      if(!isIpAddress(host)){
+        try{
+          const ip = await resolveDomainToIP(host);
+          if(ip) ipOrHost = ip;
+        }catch{ /* ignore */ }
+      }
+      // حالا از ipapi استفاده کن (روی IP یا دامنه)
+      let info = await getCountryInfoFromIpapi(ipOrHost);
+      // اگر با IP جواب نگرفتیم، تلاش کن با خود دامنه (اگر قبلاً IP بود)
+      if(!info && ipOrHost!==host){
+        info = await getCountryInfoFromIpapi(host);
+      }
+      // اگر هنوز null، برگرد به geoIp قبلی (ipwho.is) به عنوان fallback
+      if(!info){
+        const geo = await geoIp(ipOrHost);
+        if(geo) info = {code: geo.code, name: geo.name};
+      }
+      if(info){
+        proxy.country = flagAndNameFromData(info.code, info.name);
+        proxy.countryResolved=true;
+        updateCountsOnly(); // سبک
+        updateCardsOfVisibleOnly(); // سبک
+      }
+    }finally{
+      resolvingSet.delete(proxy.id);
+    }
+  }
+
+  async function resolveCountriesForVisible(){
+    const vis=getVisibleSlice();
+    for(const p of vis){
+      // اگر هنوز مشخص نشده، تلاش کن
+      if(!p.countryResolved) await resolveCountryForProxy(p);
+      await new Promise(r=>setTimeout(r,150)); // کمی فاصله برای جلوگیری از ریت‌لیمیت
+    }
+  }
+
   async function resolveDomainToIP(host){
     try{
       const res=await fetch(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`,{cache:'no-store'});
@@ -296,35 +385,6 @@
     }catch{ return null; }
   }
 
-  // فقط کشور برای آیتم‌های قابل‌نمایش را resolve می‌کنیم
-  let resolvingSet=new Set(); // جلوگیری از تکرار
-  async function resolveCountryForProxy(proxy){
-    if(resolvingSet.has(proxy.id) || proxy.countryResolved) return;
-    resolvingSet.add(proxy.id);
-    try{
-      const host=extractHostFromLink(proxy.config);
-      if(!host){ resolvingSet.delete(proxy.id); return; }
-      let ip=host;
-      if(!isIpAddress(host)){ ip=await resolveDomainToIP(host); if(!ip){ resolvingSet.delete(proxy.id); return; } }
-      const info=await geoIp(ip);
-      if(!info){ resolvingSet.delete(proxy.id); return; }
-      proxy.country=formatCountryLabel(info.name, info.code);
-      proxy.countryResolved=true;
-      updateCountsOnly(); // سبک
-      updateCardsOfVisibleOnly(); // سبک
-    }finally{
-      resolvingSet.delete(proxy.id);
-    }
-  }
-  async function resolveCountriesForVisible(){
-    const vis=getVisibleSlice();
-    for(const p of vis){
-      // اگر هنوز مشخص نشده، تلاش کن
-      if(!p.countryResolved) await resolveCountryForProxy(p);
-      await new Promise(r=>setTimeout(r,150));
-    }
-  }
-
   // لود لیست
   async function loadProxies(){
     if(isLoading) return;
@@ -334,7 +394,7 @@
       if(!response.ok) throw new Error("خطا در دریافت پاسخ از سرور");
       const text=await response.text();
       const links=text.split('\n').map(s=>s.trim()).filter(s=>s.startsWith('vmess://')||s.startsWith('vless://'));
-      allProxies=links.map((link,i)=>({id:i,config:link,country:'🌍 نامشخص',ping:null,status:'unknown',countryResolved:false}));
+      allProxies=links.map((link,i)=>({id:i,config:link,country:'🌐 نامشخص',ping:null,status:'unknown',countryResolved:false}));
       visibleCount=perPage; // ریست
       showToast('✅ کانفیگ‌ها بارگذاری شدند.','success');
     }catch(e){
@@ -361,17 +421,20 @@
       await testProxy(vis[i].id);
       await new Promise(r=>setTimeout(r,250));
     }
-    // مرتب‌سازی فقط در محدوده‌ی قابل‌نمایش
-    vis.sort((a,b)=>{
-      const pa=(a.ping??Infinity), pb=(b.ping??Infinity);
-      return pa-pb;
+
+    // مرتب‌سازی کل لیست بر اساس پینگ (آیتم‌هایی که پینگ ندارند به انتها)
+    allProxies.sort((a,b)=>{
+      const pa = (a.ping==null)?Infinity:a.ping;
+      const pb = (b.ping==null)?Infinity:b.ping;
+      return pa - pb;
     });
-    // vis مرتب شد؛ حالا باید داخل allProxies همین بخش را جایگزین کنیم
-    for(let i=0;i<vis.length;i++){ allProxies[i]=vis[i]; }
+
+    // بعد از مرتب‌سازی، برای نمایش پرچم‌های آیتم‌های جدید قابل‌نمایش تلاش کن (در صورت لزوم)
+    await resolveCountriesForVisible();
 
     setLoadingState(false);
     updateUIFullRender();
-    showToast('تست موارد نمایش‌ داده‌ شده کامل شد.','success');
+    showToast('تست موارد نمایش‌ داده‌ شده کامل شد و لیست بر اساس پینگ مرتب شد.','success');
   }
 
   // تست تکی
@@ -381,7 +444,7 @@
     proxy.status='unknown';
     updateCardIfVisible(id);
 
-    // شبیه‌سازی پینگ سبک
+    // شبیه‌سازی پینگ سبک — اگر خواستی اینجا میشه با روش واقعی‌تر جایگزین کرد
     const ping=Math.floor(Math.random()*300)+50;
     proxy.ping=ping;
     proxy.status = ping<150 ? 'good' : ping<300 ? 'medium' : 'bad';
@@ -490,10 +553,10 @@
       <div class="space-y-3 mb-6">
         <div class="flex justify-between">
           <span class="text-slate-400">کشور:</span>
-          <span class="font-medium">${proxy.country}</span>
+          <span class="font-medium">${proxy.country || '🌐 نامشخص'}</span>
         </div>
-        ${proxy.ping!==null?`
-        <div class="flex justify-between">
+        ${proxy.ping!==null?
+        `<div class="flex justify-between">
           <span class="text-slate-400">پینگ:</span>
           <span class="font-medium">${proxy.ping} ms</span>
         </div>`:''}
